@@ -50,7 +50,7 @@ target_speed = current_speed_zone # Biến lưu tốc độ xe cần đạt ( đ
 # target_speed_reached = False # Biến lưu trạng thái thay đổi tốc độ
 sensor_positions = [-7.5, -6.5, -5.5, -4.5, -3.5, -2.5, -1.5, -0.5,
                      0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5]  # Dùng cho điều khiển PID bằng tín hiệu digital
-out_of_line = False
+# out_of_line = False
 
 # ===== Biến xử lý cho nhận diện marker =====
 line_pin_count = 0 # Dùng cho nhận biết ngã rẽ
@@ -78,7 +78,7 @@ sensor = D_MNSV7_X16.Magnetic_Line_Sensor(client2)
 ## =================== HÀM DỪNG KHẨN CẤP AGV ===================
 # Note: Khi gặp vật cản hoặc ra khỏi line
 def AGV_emergency_stop():
-    global cmds, robot_running_analog, robot_running_digital, lost_line_timer, out_of_line
+    global cmds, robot_running_analog, robot_running_digital, lost_line_timer, destination_reached
     global Kp, Ki, Kd
     # global target_speed_reached
     if robot_running_analog or robot_running_digital:
@@ -110,7 +110,7 @@ def AGV_emergency_stop():
             lost_line_timer = None
             motors.disable_motor()  # Thả tự do bánh xe khi đã rời khỏi line
             print("Vô hiệu hóa bánh xe!")
-            out_of_line = True
+            destination_reached = True # Dừng kiểm tra marker
 
         print(f"Marker count: {marker_check_count}")
         print(f"Intersection marker count: {intersection_marker_check_count}")
@@ -197,22 +197,24 @@ def pid_controller_analog():
     while robot_running_analog:
         start = time.perf_counter()
 
-        # # Tăng/giảm tốc độ từ từ
-        # if not target_speed_reached:
-        #     if cmds[0] == target_speed:
-        #         target_speed_reached = True
-        #     else:
-        #         delta = 2.5 if cmds[0] < target_speed else -2.5
-        #         cmds[0] += delta
-        #         cmds[1] -= delta
-        #         Kp, Ki, Kd = pid_table.get(cmds[0], (Kp, Ki, Kd))
-
         # Tăng/giảm tốc độ từ từ
         if cmds[0] != target_speed:
             delta = 2.5 if cmds[0] < target_speed else -2.5
             cmds[0] += delta
             cmds[1] -= delta
             Kp, Ki, Kd = pid_table.get(cmds[0], (Kp, Ki, Kd))
+
+        # Dừng khi hoàn thành quãng đường, giảm dần về 0 để bám line
+        if cmds[0] == 0:
+            if destination_reached:  # Đã tới điểm đến
+                with lock_motors:
+                    motors.stop()
+                    time.sleep(0.5)
+                    Kp, Ki, Kd = pid_table.get(0)  # Cập nhật PID về ban đầu
+                    motors.enable_motor()
+                    turn_angle(180, 10, 'L', 2)  # Quay 180 độ
+                    # target_speed = current_speed_zone # Cập nhật lại tốc độ cần đạt
+                    break
 
         # Chờ lock_sensor được thả từ marker_check()
         with lock_sensor:
@@ -269,16 +271,6 @@ def pid_controller_analog():
         # Thời gian delay để tránh quá tải, race giữa các thread
         time.sleep(pid_interval)
 
-        # Dừng khi hoàn thành quãng đường, giảm dần về 0 để bám line
-        if destination_reached and cmds[0] == 0:
-            with lock_motors:
-                motors.stop()
-                time.sleep(0.5)
-                Kp, Ki, Kd = pid_table.get(0)  # Cập nhật PID về ban đầu
-                motors.enable_motor()
-                turn_angle(180, 15, 'L', 2) # Quay 180 độ
-                target_speed = current_speed_zone # Cập nhật lại tốc độ cần đạt
-                break
     print("PID analog has stopped")
 
 # =================== HÀM CHUYỂN GIÁ TRỊ HEX VỀ 1 MẢNG 16 PHẦN TỬ SỐ NGUYÊN ===================
@@ -312,22 +304,25 @@ def pid_controller_digital():
     # global target_speed_reached
     print("Start PID digital")
     while robot_running_digital:
-        position_digital, pin_count = get_position_value_digital()
-
-        # # Tăng/giảm tốc độ từ từ
-        # if not target_speed_reached:
-        #     if cmds[0] == target_speed:
-        #         target_speed_reached = True
-        #     else:
-        #         delta = 2.5 if cmds[0] < target_speed else -2.5
-        #         cmds[0] += delta
-        #         cmds[1] -= delta
-
         # Tăng/giảm tốc độ từ từ
         if cmds[0] != target_speed:
             delta = 2.5 if cmds[0] < target_speed else -2.5
             cmds[0] += delta
             cmds[1] -= delta
+
+        # Dừng khi hoàn thành quãng đường, giảm dần về 0 để bám line
+        if cmds[0] == 0:
+            if destination_reached:  # Đã tới điểm đến
+                with lock_motors:
+                    motors.stop()
+                    time.sleep(0.5)
+                    Kp, Ki, Kd = pid_table.get(0)  # Cập nhật PID về ban đầu
+                    motors.enable_motor()
+                    turn_angle(180, 10, 'L', 2)  # Quay 180 độ
+                    # target_speed = current_speed_zone # Cập nhật lại tốc độ cần đạt
+                    break
+
+        position_digital, pin_count = get_position_value_digital()
 
         if position_digital is None:
             print("Không tìm thấy line!")
@@ -521,7 +516,7 @@ def turn_angle(angle, rpm, direction, active_wheels):
     motors.enable_motor()
     motors.set_accel_time(50, 50)
     motors.set_decel_time(50, 50)
-    print("Khởi động lại xe sau khi rẽ...")
+    print("Khởi động lại xe sau khi xoay...")
     time.sleep(0.5)
 
 # =================== HÀM KIỂM TRA NGÃ RẼ ===================
@@ -537,17 +532,20 @@ def is_intersection_marker(intersect_marker_check_count):
 
 # =================== HÀM XỬ LÝ ĐỊNH HƯỚNG CHO NGÃ RẼ ===================
 def handle_intersection(intersection_count):
-    global robot_running_analog, robot_running_digital, pid_thread, target_speed
-    global start_passed, destination_reached, total_intersection_passed
+    global target_speed, current_speed_zone
+    global start_passed, destination_reached, total_intersection_passed, intersection_marker_count_met
 
     if not start_passed:
         total_intersection_passed -= 1
+        intersection_marker_count_met = 0
+        current_speed_zone = 60
+        target_speed = current_speed_zone
         start_passed = True
         return
     if total_intersection_passed > total_intersection_required:
         total_intersection_passed = 0
+        intersection_marker_count_met = 0
         target_speed = 0
-        # target_speed_reached = False
         destination_reached = True
         return
 
@@ -564,7 +562,7 @@ def marker_check():
     global marker_check_count, intersection_marker_check_count, intersection_marker_count_met, total_intersection_passed
     global current_analog_array, previous_analog_array
     global current_digital_value, prev_digital_value
-    while not out_of_line or not destination_reached:
+    while not destination_reached:
         # start = time.perf_counter()
         try:
             with lock_sensor:
@@ -662,15 +660,15 @@ def read_direction_file(base_path, start_num, end_num):
     return num_intersections, num_directions
 
 # Thư mục file dẫn đường
-directory = "E:\Food_Delivery_System\Robot_Map_Directions_2"
+directory = "E:/Food_Delivery_System/Robot_Map_Directions_2"
 
 # Các biến xử lý quãng đường đi (centimeter)
 stop_turn_distance = 37     # Quãng đường cần dừng để xoay bánh 'L'/'R'
-resume_marker_distance = 80 # Quãng đường tổng thể cần đi để tiếp tục chương trình marker_check()
+resume_marker_distance = 75 # Quãng đường tổng thể cần đi để tiếp tục chương trình marker_check()
 
 # Điểm bắt đầu và các điểm đến
 start_table = 0
-end_tables = [3, 4, 1, 2] # Minh họa điểm đến xếp theo thứ tự
+end_tables = [3] # Minh họa điểm đến xếp theo thứ tự
 
 # ===== Kích hoạt động cơ =====
 motors.disable_motor()
@@ -679,6 +677,7 @@ motors.enable_motor()
 motors.set_accel_time(50, 50)
 motors.set_decel_time(50, 50)
 
+print("Bắt đầu giao đồ ăn!")
 # ===== KÍCH HOẠT CHƯƠNG TRÌNH AGV GIAO ĐỒ ĂN TRONG NHÀ HÀNG =====
 num_destination = len(end_tables)
 for index in range(num_destination + 1):
@@ -694,8 +693,6 @@ for index in range(num_destination + 1):
     robot_running_digital = False
     current_speed_zone = 25
     target_speed = current_speed_zone
-    # target_speed_reached = False  # Biến lưu trạng thái thay đổi tốc độ
-    out_of_line = False
 
     # Biến xác nhận điểm bắt đầu và điểm đến
     start_passed = False
@@ -718,4 +715,5 @@ for index in range(num_destination + 1):
     pid_thread.join()
 
     # Chờ 3 phút để khách lấy đồ trên xe xuống và tiếp tục
-    time.sleep(180)
+    time.sleep(20)
+print("Kết thúc giao đồ ăn!")
